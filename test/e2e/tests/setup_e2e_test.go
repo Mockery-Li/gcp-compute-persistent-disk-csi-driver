@@ -55,7 +55,7 @@ var _ = BeforeSuite(func() {
 	tcc := make(chan *remote.TestContext)
 	defer close(tcc)
 
-	zones := []string{"us-central1-c", "us-central1-b"}
+	zones := []string{"us-central1-b"}
 
 	rand.Seed(time.Now().UnixNano())
 
@@ -72,7 +72,6 @@ var _ = BeforeSuite(func() {
 	if *runInProw {
 		*project, *serviceAccount = testutils.SetupProwConfig("gce-project")
 	}
-
 	Expect(*project).ToNot(BeEmpty(), "Project should not be empty")
 	Expect(*serviceAccount).ToNot(BeEmpty(), "Service account should not be empty")
 

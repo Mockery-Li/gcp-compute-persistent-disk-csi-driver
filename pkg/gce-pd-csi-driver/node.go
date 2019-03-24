@@ -18,6 +18,10 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"strings"
+	"strconv"
+	"net/http"
+	"io/ioutil"
 
 	csi "github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/golang/glog"
@@ -46,12 +50,12 @@ var _ csi.NodeServer = &GCENodeServer{}
 // persistent disks that can be attached to an instance. Please refer to gcloud doc
 // https://cloud.google.com/compute/docs/disks/#increased_persistent_disk_limits
 const (
-	OneCPU         = 1
-	EightCPUs      = 8
-	VolumeLimit16  = 16
-	VolumeLimit32  = 32
-	VolumeLimit64  = 64
-	VolumeLimit128 = 128
+	OneCPU               = 1
+	EightCPUs            = 8
+	VolumeLimit16 int64  = 16
+	VolumeLimit32 int64  = 32
+	VolumeLimit64 int64	 = 64
+	VolumeLimit128 int64 = 128
 )
 
 func (ns *GCENodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
@@ -296,7 +300,7 @@ func (ns *GCENodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoRe
 
 	nodeID := common.CreateNodeID(ns.MetadataService.GetProject(), ns.MetadataService.GetZone(), ns.MetadataService.GetName())
 
-	volumeLimits, _ = ns.GetVolumeLimits()
+	volumeLimits, _ := ns.GetVolumeLimits()
 
 	resp := &csi.NodeGetInfoResponse{
 		NodeId: nodeID,
@@ -317,49 +321,49 @@ func (ns *GCENodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpa
 	return nil, status.Error(codes.Unimplemented, fmt.Sprintf("NodeExpandVolume is not yet implemented"))
 }
 
-func (ns *GCENodeServer) GetVolumeLimits() (map[string]int64, error) {
-	volumeLimits := map[string]int64{
-		util.GCEVolumeLimitKey: VolumeLimit16,
-	}
-	cloud := ns.Driver.cs.CloudProvider
-	// cloud := plugin.host.GetCloudProvider()
+func (ns *GCENodeServer) GetVolumeLimits() (int64, error) {
+	client := &http.Client{}
+	volumeLimits := VolumeLimit16
 
-	// if we can't fetch cloudprovider we return an error
-	// hoping external CCM or admin can set it. Returning
-	// default values from here will mean, no one can
-	// override them.
-	if cloud == nil {
-		return nil, fmt.Errorf("No cloudprovider present")
-	}
+	suffix := "machine-type"
+	url := "http://metadata.google.internal/computeMetadata/v1/instance/" + suffix
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Metadata-Flavor", "Google")
 
-	// if cloud.ProviderName() != gcecloud.ProviderName {
-	// 	return nil, fmt.Errorf("Expected gce cloud got %s", cloud.ProviderName())
-	// }
-
-	instances, ok := cloud.Instances()
-	if !ok {
-		klog.Warning("Failed to get instances from cloud provider")
-		return volumeLimits, nil
-	}
-
-	instanceType, err := instances.InstanceType(context.TODO(), plugin.host.GetNodeName())
+	res, err := client.Do(req)
 	if err != nil {
-		klog.Errorf("Failed to get instance type from GCE cloud provider")
-		return volumeLimits, nil
+		return volumeLimits, err
 	}
-	if strings.HasPrefix(instanceType, "n1-") {
-		splits := strings.Split(instanceType, "-")
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusNotFound {
+		return volumeLimits, fmt.Errorf("node: metadata machine-type not defined")
+	}
+	if res.StatusCode != 200 {
+		return volumeLimits, fmt.Errorf("status code %d trying to fetch %s", res.StatusCode, url)
+	}
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return volumeLimits, err
+	}
+
+	var str string = string(body[:])
+	splits := strings.Split(str, "/")
+	var machineType = splits[len(splits)]
+
+
+	if strings.HasPrefix(machineType, "n1-") {
+		splits = strings.Split(machineType, "-")
 		if len(splits) < 3 {
 			return volumeLimits, nil
 		}
 		last := splits[2]
 		if num, err := strconv.Atoi(last); err == nil {
 			if num == OneCPU {
-				volumeLimits[util.GCEVolumeLimitKey] = VolumeLimit32
+				volumeLimits = VolumeLimit32
 			} else if num < EightCPUs {
-				volumeLimits[util.GCEVolumeLimitKey] = VolumeLimit64
+				volumeLimits = VolumeLimit64
 			} else {
-				volumeLimits[util.GCEVolumeLimitKey] = VolumeLimit128
+				volumeLimits = VolumeLimit128
 			}
 		}
 	}
