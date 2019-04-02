@@ -17,6 +17,7 @@ package gceGCEDriver
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"strings"
 	"strconv"
@@ -46,16 +47,12 @@ type GCENodeServer struct {
 
 var _ csi.NodeServer = &GCENodeServer{}
 
-// The constants are used to map from the machine type (number of CPUs) to the limit of
+// The constants are used to map from the machine type to the limit of
 // persistent disks that can be attached to an instance. Please refer to gcloud doc
-// https://cloud.google.com/compute/docs/disks/#increased_persistent_disk_limits
+// https://cloud.google.com/compute/docs/disks/#pdnumberlimits
 const (
-	OneCPU               = 1
-	EightCPUs            = 8
-	VolumeLimit16 int64  = 16
-	VolumeLimit32 int64  = 32
-	VolumeLimit64 int64	 = 64
-	VolumeLimit128 int64 = 128
+	volumeLimit16  int64 = 16
+	volumeLimit128 int64 = 128
 )
 
 func (ns *GCENodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
@@ -300,7 +297,7 @@ func (ns *GCENodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoRe
 
 	nodeID := common.CreateNodeID(ns.MetadataService.GetProject(), ns.MetadataService.GetZone(), ns.MetadataService.GetName())
 
-	volumeLimits, _ := ns.GetVolumeLimits()
+	volumeLimits, err := ns.GetVolumeLimits()
 
 	resp := &csi.NodeGetInfoResponse{
 		NodeId: nodeID,
@@ -310,7 +307,7 @@ func (ns *GCENodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetInfoRe
 		MaxVolumesPerNode:  volumeLimits,
 		AccessibleTopology: top,
 	}
-	return resp, nil
+	return resp, err
 }
 
 func (ns *GCENodeServer) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVolumeStatsRequest) (*csi.NodeGetVolumeStatsResponse, error) {
@@ -322,50 +319,14 @@ func (ns *GCENodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpa
 }
 
 func (ns *GCENodeServer) GetVolumeLimits() (int64, error) {
-	client := &http.Client{}
-	volumeLimits := VolumeLimit16
+	var volumeLimits int64
 
-	suffix := "machine-type"
-	url := "http://metadata.google.internal/computeMetadata/v1/instance/" + suffix
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Metadata-Flavor", "Google")
-
-	res, err := client.Do(req)
-	if err != nil {
-		return volumeLimits, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode == http.StatusNotFound {
-		return volumeLimits, fmt.Errorf("node: metadata machine-type not defined")
-	}
-	if res.StatusCode != 200 {
-		return volumeLimits, fmt.Errorf("status code %d trying to fetch %s", res.StatusCode, url)
-	}
-	body, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return volumeLimits, err
-	}
-
-	var str string = string(body[:])
-	splits := strings.Split(str, "/")
-	var machineType = splits[len(splits)]
-
-
-	if strings.HasPrefix(machineType, "n1-") {
-		splits = strings.Split(machineType, "-")
-		if len(splits) < 3 {
-			return volumeLimits, nil
-		}
-		last := splits[2]
-		if num, err := strconv.Atoi(last); err == nil {
-			if num == OneCPU {
-				volumeLimits = VolumeLimit32
-			} else if num < EightCPUs {
-				volumeLimits = VolumeLimit64
-			} else {
-				volumeLimits = VolumeLimit128
-			}
-		}
+	// Machine-type format: n1-type-CPUS or custom-CPUS-RAM or f1/g1-type
+	machineType := ns.MetadataService.GetMachineType()
+	if strings.HasPrefix(machineType, "n1-") || strings.HasPrefix(machineType, "custom-") {
+		volumeLimits = volumeLimit128
+	} else {
+		volumeLimits = volumeLimit16
 	}
 	return volumeLimits, nil
 }
